@@ -39,7 +39,7 @@ A concept with no code (governance, licensing, capacity) still gets a concrete a
 
 ## Workflow
 
-1. **Research first** (REQUIRED: use deep-research / parallel-web-search / web search). Pull the *current* official skills outline (e.g. learn.microsoft.com study guide, vendor certification page) and record its "as of" date. Build the topic tree from the official outline, then add practitioner topics it omits. Never invent exam weights, limits, or product names — mark unverifiable facts or drop them.
+1. **Research first** (REQUIRED: use deep-research / parallel-web-search / web search). Pull the *current* official skills outline (e.g. learn.microsoft.com study guide, vendor certification page) and record its "as of" date. Build the topic tree from the official outline, then add practitioner topics it omits. Never invent exam weights, limits, or product names — mark unverifiable facts or drop them. Confirm the exam on the vendor site (e.g. learn.microsoft.com exam + study-guide pages) **and** cross-check the wider web (announcements, community posts) before writing. If no official outline exists, still deliver full coverage: build the tree from the union of the vendor's docs/courses, related exam guides, and practitioner topics; add one short "how this outline was built" note and omit weights.
 2. **Outline** the tree in the Markdown file before writing bodies; check it against the official outline line by line.
 3. **Write** section by section into `guides/<slug>/<slug>.md`. Multiple guides → one parallel agent per guide (REQUIRED: superpowers:dispatching-parallel-agents).
 4. **Interview Q&A** (REQUIRED: interview-prep skill if available) — questions real panels ask for the target role.
