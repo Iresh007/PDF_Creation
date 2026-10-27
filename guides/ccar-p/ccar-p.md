@@ -715,6 +715,17 @@ and any exception. Then output only "COMPLIANT" or "VIOLATION: <reason>" inside 
 | Prefill `<answer>` to skip preamble | Instruction "Respond only inside `<answer>` tags" + parse |
 | Forced `tool_choice` to get JSON | Structured outputs or `strict: true` tool with `auto` |
 
+**Example (before and after).**
+
+```python
+# Legacy (400 on Claude 4.6+): messages=[..., {"role": "assistant", "content": "{"}]
+# Current:
+r = client.messages.create(model="claude-sonnet-5-5", max_tokens=1024,
+    system="Respond only inside <answer></answer> tags. No preamble.",
+    messages=[{"role": "user", "content": f"Summarize this incident in 2 sentences:\n{incident}"}])
+answer = re.search(r"<answer>(.*?)</answer>", r.content[0].text, re.S).group(1).strip()
+```
+
 <div class="callout warn" markdown="1">
 **Exam trap.** Older study material still teaches prefill. If an option relies on prefill for a current model, it is outdated; the guarded answer is structured outputs.
 </div>
@@ -1615,6 +1626,15 @@ success_criteria:
 | Incident/regression cases | Catches repeats | Skews toward rare failures |
 | Adversarial/red-team | Safety and security coverage | Needs specialists |
 
+**Example (eval case record, JSONL).**
+
+```json
+{"id": "sup-0412", "split": "test", "category": "billing/refund", "difficulty": "hard",
+ "source": "prod-2026-09 (PII scrubbed)", "question": "I was charged twice after upgrading mid-cycle, can I get one back?",
+ "gold": "Yes: duplicate charge refunded in 5-7 business days per Billing Policy 4.2",
+ "doc_id": "billing_policy_v9#4.2", "tags": ["proration", "duplicate_charge"]}
+```
+
 ### Grading methods
 
 | Grader | Use when | Gotcha |
@@ -2025,9 +2045,9 @@ Consequences: <costs, risks, follow-ups, revisit trigger>
 Status: accepted (2026-10-02)
 Context: 9k employees, 1,800 policy pages, p95 < 5 s, EU data, $3k/month budget.
 Options:
-  A. Whole corpus in cached prompt (1.2M tokens) – exceeds window; rejected.
-  B. Hybrid RAG + Sonnet 5.5 low effort – 92.4% faithfulness, p95 3.1 s, $1.9k/mo.
-  C. Hybrid RAG + Opus 5.5 medium – 94.0%, p95 7.8 s, $4.6k/mo (misses SLA and budget).
+  A. Whole corpus in cached prompt (1.2M tokens): exceeds window; rejected.
+  B. Hybrid RAG + Sonnet 5.5 low effort: 92.4% faithfulness, p95 3.1 s, $1.9k/mo.
+  C. Hybrid RAG + Opus 5.5 medium: 94.0%, p95 7.8 s, $4.6k/mo (misses SLA and budget).
 Decision: B, with Opus fallback for questions flagged "complex" by the router (≈4% of traffic).
 Consequences: monthly eval refresh; revisit if faithfulness < 92% for 2 weeks.
 ```
@@ -2215,7 +2235,19 @@ argument-hint: [version]
 
 **What it is.** Subagents are specialized assistants in `.claude/agents/*.md` (or `~/.claude/agents/`) with their own system prompt, tool list, model and context window. Claude delegates based on the `description`, or you ask explicitly. They keep the main conversation clean (a search that reads 40 files returns a summary) and enforce least privilege per role. Frontmatter: `name`, `description` (required), `tools`, `disallowedTools`, `model`, `permissionMode`, `maxTurns`, `skills`, `mcpServers`, `hooks`, `isolation: worktree`.
 
-**Example.** See the `security-reviewer` subagent in 1.5. Typical team set: `code-reviewer` (read-only, Sonnet), `test-writer` (Edit in `tests/**`), `db-migration-checker` (read-only, Opus).
+**Example (`.claude/agents/test-writer.md`).** See also `security-reviewer` in 1.5.
+
+```markdown
+---
+name: test-writer
+description: Writes and fixes pytest tests for changed code. Use after implementing a feature or when tests fail.
+tools: Read, Grep, Glob, Edit, Bash(pytest:*)
+model: sonnet
+maxTurns: 25
+---
+Write tests only under tests/. Cover the happy path, one edge case and one failure case per public function.
+Run pytest -q on the files you touched and iterate until green. Never modify src/ files.
+```
 
 ### MCP servers and plugins for teams
 
@@ -2603,18 +2635,21 @@ Forty questions panels ask for senior AI architect and LLM engineer roles, mixin
 <div class="qa" markdown="1">
 #### Q1. When do you build an agent instead of a workflow?
 When the path can't be specified in advance, the value justifies extra tokens and latency, Claude can do the task, and errors are recoverable. Otherwise a workflow is cheaper, faster and easier to test. I usually start with a single call, add a fixed chain, and only hand control to the model when the branching is genuinely open-ended.
+
 *Follow-up:* "How do you stop an agent?" Step caps, token or dollar budgets, goal checks, human checkpoints.
 </div>
 
 <div class="qa" markdown="1">
 #### Q2. Walk me through the agent loop on the Messages API.
 Send messages with tools; if `stop_reason` is `tool_use`, execute every `tool_use` block, append the assistant content, then one user message holding all `tool_result` blocks (errors with `is_error: true`); repeat until `end_turn`. Handle `pause_turn` by re-sending, `max_tokens` by raising the cap or streaming, and `refusal` by escalating.
+
 *Follow-up:* "Why one user message for parallel results?" Splitting them teaches the model to stop calling tools in parallel.
 </div>
 
 <div class="qa" markdown="1">
 #### Q3. How do you choose between Haiku, Sonnet and Opus?
 Run the same eval set across candidates and effort levels, then choose on accuracy against the threshold, p95 against the SLA, and cost per completed task. I often find the stronger model at lower effort beats a cascade, and one model keeps one cache namespace. Mixed traffic gets a router.
+
 *Follow-up:* "When is a cascade worth it?" When easy traffic dominates and the router is accurate enough that escalations stay rare.
 </div>
 
@@ -2624,90 +2659,105 @@ The API caches the processed prefix (tools → system → messages) up to a `cac
 ```python
 system=[{"type": "text", "text": POLICY, "cache_control": {"type": "ephemeral"}}]
 ```
+
 *Follow-up:* "How do you verify?" `usage.cache_read_input_tokens` on the second request.
 </div>
 
 <div class="qa" markdown="1">
 #### Q5. How do you get reliable JSON out of Claude?
 Structured outputs (`output_config.format` with a JSON schema, or `messages.parse` with Pydantic). For tool arguments, `strict: true`. Then validate business rules in code, because schema-valid isn't the same as correct. Prefill and forced `tool_choice` are legacy approaches rejected on current models.
+
 *Follow-up:* "Can you combine with citations?" No, it returns a 400; pick one per call or split the calls.
 </div>
 
 <div class="qa" markdown="1">
 #### Q6. Design a RAG system for 50,000 policy documents.
 Structure-aware chunking with contextual headers, hybrid dense + BM25 retrieval fused by RRF, metadata filters for ACL and effective date, a reranker to the top 10–20, documents first and question last, citations on, and an "I can't find it" path. Evals measure retrieval recall@k separately from answer faithfulness. Re-index incrementally with versioned embeddings.
+
 *Follow-up:* "When would you skip RAG?" A small KB (roughly under 200K tokens) fits in a cached prompt.
 </div>
 
 <div class="qa" markdown="1">
 #### Q7. A RAG bot started hallucinating last week. How do you debug it?
 Check what changed: deploys, index jobs, embedding model, source data. Pull failing traces and look at retrieved chunks. If chunks are wrong, it's retrieval; if chunks are right but the answer strays, tighten grounding (quotes first, citations, refusal path) or raise effort/model. Add the failures to the eval set.
+
 *Follow-up:* "How do you prevent recurrence?" Eval gate in the indexing pipeline, not just in app deploys.
 </div>
 
 <div class="qa" markdown="1">
 #### Q8. MCP vs plain function calling?
 Function calling is the model-side mechanism. MCP is a protocol for packaging tools, resources and prompts so many hosts can reuse one server, with standard transports and OAuth. For one app with three internal functions, custom tools are simpler. For capabilities used across Claude Code, Desktop and several agents, MCP avoids duplicate integrations.
+
 *Follow-up:* "Which transport for remote?" Streamable HTTP; SSE is deprecated; stdio for local subprocesses.
 </div>
 
 <div class="qa" markdown="1">
 #### Q9. What are MCP's primitives and who controls each?
 Tools are model-controlled, resources are application-controlled context, and prompts are user-selected templates. Clients can offer sampling (server asks the host's model), roots (scope boundaries) and elicitation (ask the user mid-operation).
+
 *Follow-up:* "Security concerns?" Third-party servers are code you run and content you trust; allowlist tools, pin versions, review scopes.
 </div>
 
 <div class="qa" markdown="1">
 #### Q10. How do you defend an agent against prompt injection?
 Assume some injections succeed and limit the blast radius: least-privilege tools, separate readers of untrusted content from actors, approval gates on consequential actions, egress allowlists, sandboxing, operator instructions through the system role, and an injection test suite in CI. Prompt warnings are a minor layer.
+
 *Follow-up:* "Give an example." An email-triage agent with no send or payment tools can't be tricked into sending.
 </div>
 
 <div class="qa" markdown="1">
 #### Q11. How do you evaluate an LLM feature before launch?
 Define metrics per family (accuracy, latency, cost, safety, security) with thresholds. Build a dataset from real samples, edge cases, adversarial cases and past failures. Grade with code where possible, a calibrated LLM judge for open-ended quality, and humans for calibration. Gate releases in CI.
+
 *Follow-up:* "How big?" Big enough to detect the difference you care about; hundreds of cases for a few points.
 </div>
 
 <div class="qa" markdown="1">
 #### Q12. How do you make an LLM judge trustworthy?
 Use a clear rubric with anchors, ask for reasoning before the score, use structured output, compare against 100+ human labels (agreement such as Cohen's kappa), check length and position bias, and use pairwise comparison for close calls. Re-calibrate when the judge model changes.
+
 *Follow-up:* "Same model as generator?" Acceptable if calibrated, but a different prompt and context, and ideally a stronger model.
 </div>
 
 <div class="qa" markdown="1">
 #### Q13. Your monthly Claude bill doubled. What do you do?
 Profile by app, key and model from usage logs or the Admin usage/cost reports. Check cache hit ratio, input growth (history, RAG chunk count, tool definitions), agent steps per task, and effort settings. Then apply free wins (caching, input hygiene, batch) before trade-offs (effort, model routing).
+
 *Follow-up:* "One metric to watch?" Cost per completed task.
 </div>
 
 <div class="qa" markdown="1">
 #### Q14. How do you handle long conversations that approach the context limit?
 Server-side compaction for long chats and agents, context editing to clear stale tool results, subagents to isolate read-heavy work, the memory tool or an external store for durable facts, and retrieval instead of stuffing. Append the full response content so compaction blocks survive.
+
 *Follow-up:* "Compaction vs context editing?" Compaction summarizes; editing deletes specific old content.
 </div>
 
 <div class="qa" markdown="1">
 #### Q15. Explain adaptive thinking and effort.
 Adaptive thinking lets Claude decide when and how much to reason; `effort` (low → max) controls depth and token spend. The old fixed `budget_tokens` mode is rejected on current models. Thinking tokens bill as output, so effort is the main quality-cost dial after caching.
+
 *Follow-up:* "Can users see the reasoning?" Only summaries (`display: "summarized"`); raw chain of thought isn't returned.
 </div>
 
 <div class="qa" markdown="1">
 #### Q16. How would you design multi-agent research?
 A lead agent plans and delegates scoped subtasks (objective, output format, tools, boundaries, budget) to subagents running in parallel with their own context, each returning condensed findings with sources. The lead synthesizes and a citation pass verifies claims. It costs several times a single agent's tokens, so I use it for breadth-first questions only.
+
 *Follow-up:* "Failure modes?" Duplicate work from vague delegation, over-spawning, lossy summaries.
 </div>
 
 <div class="qa" markdown="1">
 #### Q17. How do you secure API keys and identities?
 Keys live in a secret manager, scoped per workspace and app, rotated; better still, Workload Identity Federation with short-lived tokens. Cloud platforms use native IAM. MCP uses OAuth per user. Tools enforce the end user's permissions from the session, not from model output.
+
 *Follow-up:* "What's a confused deputy here?" An agent with a super-user service account doing what any user asks.
 </div>
 
 <div class="qa" markdown="1">
 #### Q18. What goes into a Claude Code setup for a 50-engineer team?
 A concise checked-in CLAUDE.md, `.claude/settings.json` with allow/deny rules, managed settings for org-wide security (deny `.env`, approved MCP servers), hooks for formatting and protected paths, shared skills and subagents (reviewer, test writer), a project `.mcp.json`, a plugin to distribute it all, and CI review via the GitHub Action.
+
 *Follow-up:* "How do you keep CLAUDE.md effective?" Under ~200 lines, no contradictions, must-do rules moved into hooks.
 </div>
 
@@ -2717,132 +2767,154 @@ CLAUDE.md is always-loaded guidance (best effort). Skills are on-demand procedur
 ```json
 {"hooks": {"PreToolUse": [{"matcher": "Edit|Write", "hooks": [{"type": "command", "command": ".claude/hooks/protect_paths.sh"}]}]}}
 ```
+
 *Follow-up:* "How does a hook block?" Exit code 2; stderr goes back to Claude.
 </div>
 
 <div class="qa" markdown="1">
 #### Q20. How do you run Claude Code safely in CI?
 `claude --bare -p` with explicit `--allowedTools`, `--max-turns`, structured output if a script parses results, secrets from the CI vault, least-privilege repo permissions, and no `bypassPermissions` outside an isolated container. `--bare` avoids loading whatever hooks and MCP config the checked-out repo contains.
+
 *Follow-up:* "Why is that a risk?" A `-p` session shows no trust dialog, so a malicious repo's hooks would run.
 </div>
 
 <div class="qa" markdown="1">
 #### Q21. Agent SDK vs Messages API with your own loop?
 The Agent SDK gives the Claude Code harness: built-in file/bash/search tools, permissions, hooks, subagents, sessions and compaction. Use it for coding, ops or file-heavy agents. Your own loop (or the Tool Runner) fits product features with a few custom tools and tight control over every request.
+
 *Follow-up:* "And Managed Agents?" When you want Anthropic to host the loop and a sandbox, with versioned agents and schedules.
 </div>
 
 <div class="qa" markdown="1">
 #### Q22. Users say the assistant is slow. How do you fix latency?
 Measure TTFT vs generation time. TTFT problems: large uncached prompts, queueing; fix with caching and trimming. Generation problems: long outputs or deep thinking; fix with streaming, shorter formats, lower effort, a faster model on the hot path, fast mode where available, or parallelizing independent calls.
+
 *Follow-up:* "What doesn't help?" Batch API for interactive use.
 </div>
 
 <div class="qa" markdown="1">
 #### Q23. How do you handle 429 and 529 errors at scale?
 SDK retries with exponential backoff and `retry-after`, client-side rate limiting and queueing, caching (reads don't count toward ITPM on most models), batching non-urgent work, separate workspaces per app to isolate limits, tier increases, and fallback to another model or platform for 529s.
+
 *Follow-up:* "Mid-stream errors?" An overloaded error can arrive as an SSE `error` event after HTTP 200; treat it as retryable.
 </div>
 
 <div class="qa" markdown="1">
 #### Q24. Design human-in-the-loop for an accounts-payable agent.
 Auto-approve low-value invoices that match PO and receipt (three-way match) with high confidence; route mismatches, new vendors, bank-detail changes and amounts above threshold to a reviewer with the evidence shown; sample 5% of auto-approvals for audit. Measure reviewer agreement and turnaround.
+
 *Follow-up:* "How do you avoid rubber-stamping?" Show the evidence and disagreements, rotate audits, track override rates.
 </div>
 
 <div class="qa" markdown="1">
 #### Q25. How do GDPR and HIPAA change your architecture?
 GDPR: minimization and redaction, lawful basis, DPA, EU residency (regional deployment or inference location), retention and deletion paths, transparency. HIPAA: BAA covering the services used, minimum necessary PHI, encrypted and access-logged storage, no PHI in general logs. Both: data-flow diagrams and DPIA or risk assessment.
+
 *Follow-up:* "Where does ZDR fit?" When inputs and outputs mustn't be retained; check which features and models are eligible.
 </div>
 
 <div class="qa" markdown="1">
 #### Q26. A stakeholder wants 100% accuracy. How do you respond?
 Show the measured accuracy on their own examples, explain the residual error rate, and design controls around it: citations, confidence routing, human review for consequential cases, feedback loops. Agree an SLO and a review cadence. Promising determinism sets the project up to fail.
+
 *Follow-up:* "And if they insist?" Narrow the scope to cases where measured accuracy meets the bar.
 </div>
 
 <div class="qa" markdown="1">
 #### Q27. Tell me about a production LLM incident you handled.
 Use STAR. Example shape: a prompt change raised refusals on benign billing questions by 6%; online judge sampling caught it within an hour; rollback via a prompt-version flag; root cause was a new safety sentence that over-generalized; fix plus 40 benign cases added to the eval; added a canary stage.
+
 *Follow-up:* "What did you change in the process?" Prompt changes now go through the same CI eval gate as code.
 </div>
 
 <div class="qa" markdown="1">
 #### Q28. How do you version and deploy prompts?
 Prompts live in git as modules with IDs and versions, are rendered from templates, carry linked eval results, deploy behind a feature flag, and are logged per request (`prompt_version`). Rollback is a flag flip. Stable modules go first for caching.
+
 *Follow-up:* "Who approves?" Owners per prompt; CI eval must pass thresholds.
 </div>
 
 <div class="qa" markdown="1">
 #### Q29. How do you choose chunk size?
 Start from document structure (sections, clauses), cap around a few hundred tokens with modest overlap, then tune on retrieval recall@k against labeled queries. Smaller chunks raise precision but lose context; parent-child retrieval and contextual headers recover it.
+
 *Follow-up:* "Tables?" Chunk by row or table with headers repeated, or put them in SQL.
 </div>
 
 <div class="qa" markdown="1">
 #### Q30. What is capability bloat and why does it matter?
 Giving an agent more tools, scopes or data than its role needs. It costs tokens on every request, increases wrong-tool calls, and widens the injection blast radius. The fix is removing capabilities, splitting roles, allowlisting MCP tools, and using tool search for large catalogs.
+
 *Follow-up:* "Isn't a confirmation enough?" It's a compensating control; removal is the primary one.
 </div>
 
 <div class="qa" markdown="1">
 #### Q31. How would you migrate a production app to a newer Claude model?
 Read the migration notes for breaking changes (thinking config, forced `tool_choice`, prefill, sampling params), re-count tokens, run the eval at several effort levels, re-tune prompts that were too prescriptive, compare cost per task, canary with rollback, then update docs.
+
 *Follow-up:* "Biggest surprise you'd expect?" Effort defaults and output length shift, so cost and latency change even when quality improves.
 </div>
 
 <div class="qa" markdown="1">
 #### Q32. How do you monitor an agent in production?
 Traces with a span per model call and tool call, per-task metrics (steps, tokens, cost, duration, success), alerting on loops and spend spikes, sampled online quality scoring, and stop-reason distributions. Request IDs logged for vendor support.
+
 *Follow-up:* "What's the earliest warning of a runaway agent?" Steps per task and repeated identical tool calls.
 </div>
 
 <div class="qa" markdown="1">
 #### Q33. When would you use Batch API, streaming, or fast mode?
 Batch for non-interactive volume (50% off, results within 24 h). Streaming for any user-facing or long output (perceived latency, avoids timeouts). Fast mode for latency-critical Opus workloads where the premium is justified, on the Claude API only.
+
 *Follow-up:* "Can you cache inside batches?" Yes, and the discounts stack.
 </div>
 
 <div class="qa" markdown="1">
 #### Q34. How do you reduce hallucinations in document Q&A?
 Put documents first, ask for supporting quotes before the answer, allow "not found", enable citations, keep effort adequate for the reasoning required, and verify claims against sources with a second pass for high-stakes outputs. Measure faithfulness separately from helpfulness.
+
 *Follow-up:* "Does temperature matter?" Sampling params are removed on current models; grounding is the lever.
 </div>
 
 <div class="qa" markdown="1">
 #### Q35. Describe a decision you documented in an ADR.
 Example: hybrid RAG with Sonnet at low effort vs Opus at medium. Context included SLA, budget and residency; options had measured accuracy, p95 and monthly cost; the decision kept an Opus fallback for flagged complex questions; consequences listed the revisit trigger. Numbers made the trade-off clear to non-engineers.
+
 *Follow-up:* "How did you get buy-in?" Shared the eval on their own examples.
 </div>
 
 <div class="qa" markdown="1">
 #### Q36. What belongs in the system prompt vs the user turn?
 System: role, stable rules with reasons, output format, tool-use policy. User turn: the task data and question, wrapped in tags. Stable content first for caching. Mid-conversation operator updates go in a system-role message, not pasted into user text where they could be spoofed.
+
 *Follow-up:* "Why explain reasons?" Claude generalizes better from the why than from bare "NEVER" rules.
 </div>
 
 <div class="qa" markdown="1">
 #### Q37. How do you test for bias?
 Counterfactual pairs that change only protected attributes, outcome-rate comparisons across groups, review of retrieved context for skew, and human accountability for consequential decisions. Make it a release gate with thresholds, not a one-time audit.
+
 *Follow-up:* "If the model is fine but outcomes differ?" Check upstream data and retrieval.
 </div>
 
 <div class="qa" markdown="1">
 #### Q38. How do you decide between Bedrock, Vertex and the direct API?
 Where the data, identity and contracts already live (IAM, VPC, committed spend, compliance boundary such as GovCloud), which features you need (new betas often appear on the first-party API first), pricing, and quotas. Keep code portable by isolating the client factory.
+
 *Follow-up:* "Code differences?" Different client classes and model ID formats; the Messages surface is the same.
 </div>
 
 <div class="qa" markdown="1">
 #### Q39. Your Claude Code users say it "forgets" project rules. What do you check?
 Whether CLAUDE.md is loaded (`/memory`), its length and contradictions, rules buried in subdirectory files that load only on demand, context pressure (`/context`), and whether the rule should be a hook or permission instead of an instruction.
+
 *Follow-up:* "And after compaction?" CLAUDE.md is re-read; ad-hoc chat instructions may be summarized away, so put durable rules in files.
 </div>
 
 <div class="qa" markdown="1">
 #### Q40. What would you do in your first 90 days as an AI architect here?
 Days 1–30: inventory AI use cases, data flows, spend and risks; meet stakeholders. Days 31–60: shared platform pieces (client wrapper with logging, prompt registry, eval harness, guardrail library, approved MCP servers). Days 61–90: take one high-value use case to production with SLOs and a runbook, then publish the reference architecture.
+
 *Follow-up:* "What would you not do?" Start with a sprawling multi-agent platform before one use case proves value.
 </div>
 
